@@ -16,7 +16,7 @@
 from functools import partial
 import unittest
 
-from absl.testing import absltest
+from absl.testing import absltest, parameterized
 
 import numpy as np
 import scipy.signal as osp_signal
@@ -243,6 +243,51 @@ class LaxBackedScipySignalTests(jtu.JaxTestCase):
 
     self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker, rtol=tol, atol=tol)
     self._CompileAndCheck(jsp_fun, args_maker, rtol=tol, atol=tol)
+
+  @parameterized.product(op=['stft', 'csd', 'welch'], noverlap=[0, None])
+  def testSpectralCallableDetrend(self, op, noverlap):
+    # Regression test for https://github.com/jax-ml/jax/issues/42599.
+    def center(d):
+      return d - d.mean(axis=-1, keepdims=True)
+
+    kwds = dict(window='boxcar', nperseg=4, noverlap=noverlap, detrend=center)
+    if op == 'stft':
+      kwds.update(boundary=None, padded=False)
+    x = np.arange(8, dtype=np.float32)
+    args_maker = lambda: [x, x ** 2] if op == 'csd' else [x]
+    osp_fun = partial(getattr(osp_signal, op), **kwds)
+    jsp_fun = partial(getattr(jsp_signal, op), **kwds)
+
+    self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker,
+                           check_dtypes=False, tol=1e-5)
+    self._CompileAndCheck(jsp_fun, args_maker, tol=1e-5)
+
+  @parameterized.named_parameters(
+    ('1d_negative', (8,), -1, (2, 4)),
+    ('1d_positive', (8,), 0, (4, 2)),
+    ('2d_first', (8, 3), 0, (4, 3, 2)),
+    ('2d_last_negative', (3, 8), -1, (3, 2, 4)),
+    ('2d_last_positive', (3, 8), 1, (3, 4, 2)),
+    ('3d_middle_negative', (2, 12, 5), -2, (2, 5, 4, 3)),
+    ('3d_middle_positive', (2, 12, 5), 1, (2, 4, 5, 3)),
+  )
+  def testStftCallableDetrendAxis(self, shape, axis, detrend_shape):
+    def center(d):
+      # Segmenting adds an axis, so retain the sign of the original axis.
+      self.assertEqual(d.shape, detrend_shape)
+      return d - d.mean(axis=axis, keepdims=True)
+
+    kwds = dict(window='boxcar', nperseg=4, noverlap=0, detrend=center,
+                boundary=None, padded=False, axis=axis)
+    osp_fun = partial(osp_signal.stft, **kwds)
+    jsp_fun = partial(jsp_signal.stft, **kwds)
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, np.float32)]
+    tol = _TPU_FFT_TOL if jtu.test_device_matches(['tpu']) else 1e-5
+
+    self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker,
+                           check_dtypes=False, tol=tol)
+    self._CompileAndCheck(jsp_fun, args_maker, tol=tol)
 
   # Tests with `average == 'median'`` is excluded from `testCsd*`
   # due to the issue:
